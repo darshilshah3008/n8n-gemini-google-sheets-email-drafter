@@ -1,0 +1,11 @@
+# n8n / Node related
+node_modules/
+.n8n/
+.env
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

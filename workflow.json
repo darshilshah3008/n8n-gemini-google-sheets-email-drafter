@@ -1,0 +1,640 @@
+{
+  "name": "Draft Emails from Google Sheet (One-by-One) - Gemini HTTP",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "a06fca90-5e0a-423b-aa25-cc3ca9c7cb71",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        608,
+        1760
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "REPLACE_WITH_YOUR_SHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sheet1",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "5b030a05-e5ee-46ed-9c19-145e30baa05c",
+      "name": "Google Sheets - Read Rows",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        832,
+        1760
+      ]
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "87270482-6196-49ec-ba40-fb515016007b",
+      "name": "Loop Rows (Split In Batches)",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        1264,
+        1680
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [],
+          "number": [],
+          "string": [
+            {
+              "value1": "={{$json[\"Draft Status\"] || \"\"}}",
+              "operation": "notEquals",
+              "value2": "Drafted"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "4e38ee88-4f97-4990-86bf-8d9a4427945a",
+      "name": "IF - Not Drafted",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1520,
+        1760
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "function isEmpty(v) {\n  if (v === null || v === undefined) return true;\n  if (typeof v === 'string' && v.trim() === '') return true;\n  return false;\n}\n\n// Prefer row_number, fallback rowNumber\nconst rowNumber = $json.row_number ?? $json.rowNumber;\n\n// Keys we don't want in the context\nconst excludeKeys = new Set([\n  'rowNumber', 'row_number',\n  'Draft Email Subject (Generated)',\n  'Draft Email Body (Generated)',\n  'Draft Status',\n  'Workflow Notes'\n]);\n\nconst parts = [];\nfor (const [k, v] of Object.entries($json)) {\n  if (excludeKeys.has(k)) continue;\n  if (isEmpty(v)) continue;\n  parts.push(`${k}: ${String(v).trim()}`);\n}\n\nreturn [\n  {\n    json: {\n      ...$json,\n      row_number: rowNumber,\n      rowContext: parts.join('\\n')\n    }\n  }\n];"
+      },
+      "id": "def94a3d-d857-4adc-8e0b-79a7e1bf2565",
+      "name": "Build Row Context (Available Columns)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        1760
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Exclude system / generated fields\nconst excludedKeys = [\n  'Draft Email Subject (Generated)',\n  'Draft Email Body (Generated)',\n  'rawContext',\n  'rowContext',          // ✅ add this\n  'prompt',              // ✅ already there\n  'Draft Status',\n  'Gmail Draft ID',\n  'Workflow Notes',\n  'Status'               // optional, but fine\n];\n\n// Build clean customer context\nconst contextLines = Object.entries($json)\n  .filter(([key, value]) => value && !excludedKeys.includes(key))\n  .map(([key, value]) => `${key}: ${value}`);\n\nconst customerContext = contextLines.join('\\n');\n\n// ✅ DEFINE the prompt variable (this was missing)\nconst prompt = `\nYou are ABC Catering Service.\n\nCustomer & Event Details:\n${customerContext}\n\nTASK:\nWrite a personalized, professional first-response catering email.\n\nRequirements:\n- Friendly and professional tone\n- Mention event type, date, guest count, and venue\n- Ask 3–5 clarifying questions (menu, dietary needs, service style, budget)\n- Clear call-to-action\n- Sign off as \"ABC Catering Team\"\n\nIMPORTANT:\n- Do NOT ask for JSON\n- Do NOT apologize\n- Do NOT ask for more information\n\nReturn ONLY in this exact format (no JSON, no explanations):\n\nSUBJECT:\n<one-line subject>\n\nBODY:\n<email body>\n`;\n\nreturn {\n  json: {\n    ...$json,\n    prompt\n  }\n};\n"
+      },
+      "id": "48f3058a-e260-41f5-98e5-6dcfb400a13a",
+      "name": "Prepare Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        1760
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={{$env.GEMINI_API_KEY}}",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "contents[0].parts[0].text",
+              "value": "={{$json.prompt}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "de35c9ed-b649-4712-a3a4-a72e83ccee25",
+      "name": "LLM - Gemini Generate (HTTP)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        2240,
+        1760
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const text =\n  $json.candidates?.[0]?.content?.parts?.[0]?.text || '';\n\nconst subjectMatch = text.match(/SUBJECT:\\s*([\\s\\S]*?)\\nBODY:/i);\nconst bodyMatch = text.match(/BODY:\\s*([\\s\\S]*)$/i);\n\nconst subject = (subjectMatch?.[1] || '').trim();\nconst body = (bodyMatch?.[1] || '').trim();\n\n// ✅ Merge original row data (from Prepare Prompt) with the Gemini response\nconst original = $node[\"Prepare Prompt\"].json;\n\nreturn [\n  {\n    json: {\n      ...original,\n      ...$json,\n      \"Draft Email Subject (Generated)\": subject,\n      \"Draft Email Body (Generated)\": body,\n      \"Draft Status\": \"Drafted\",\n      \"Workflow Notes\": \"Generated by Gemini API\"\n    }\n  }\n];\n"
+      },
+      "id": "79e096cc-425e-412d-8c11-e97ab807c1ae",
+      "name": "Parse LLM Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2480,
+        1760
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "REPLACE_WITH_YOUR_SHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sheet1",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Draft Email Subject (Generated)": "={{ $json[\"Draft Email Subject (Generated)\"] }}",
+            "Draft Email Body (Generated)": "={{ $json[\"Draft Email Body (Generated)\"] }}",
+            "Draft Status": "={{ $json[\"Draft Status\"] }}",
+            "Workflow Notes": "={{ $json[\"Workflow Notes\"] }}",
+            "Customer ID": "={{ $json[\"Customer ID\"] }}"
+          },
+          "matchingColumns": [
+            "Customer ID"
+          ],
+          "schema": [
+            {
+              "id": "Customer ID",
+              "displayName": "Customer ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Customer Name",
+              "displayName": "Customer Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Email",
+              "displayName": "Email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Phone",
+              "displayName": "Phone",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Company/Organization",
+              "displayName": "Company/Organization",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Event Type",
+              "displayName": "Event Type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Event Date",
+              "displayName": "Event Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Event Start Time",
+              "displayName": "Event Start Time",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Event End Time",
+              "displayName": "Event End Time",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Guest Count",
+              "displayName": "Guest Count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Venue Name",
+              "displayName": "Venue Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Venue Address",
+              "displayName": "Venue Address",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Service Style",
+              "displayName": "Service Style",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Cuisine Preference",
+              "displayName": "Cuisine Preference",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Dietary/Allergy Notes",
+              "displayName": "Dietary/Allergy Notes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Menu Package Interest",
+              "displayName": "Menu Package Interest",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Beverage Needs",
+              "displayName": "Beverage Needs",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Estimated Budget (USD)",
+              "displayName": "Estimated Budget (USD)",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Delivery/Setup",
+              "displayName": "Delivery/Setup",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Lead Source",
+              "displayName": "Lead Source",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Preferred Contact Method",
+              "displayName": "Preferred Contact Method",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Best Time to Reach",
+              "displayName": "Best Time to Reach",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Notes",
+              "displayName": "Notes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Status",
+              "displayName": "Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Draft Email Subject (Generated)",
+              "displayName": "Draft Email Subject (Generated)",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Draft Email Body (Generated)",
+              "displayName": "Draft Email Body (Generated)",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Draft Status",
+              "displayName": "Draft Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Gmail Draft ID",
+              "displayName": "Gmail Draft ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Workflow Notes",
+              "displayName": "Workflow Notes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "rowContext",
+              "displayName": "rowContext",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "prompt",
+              "displayName": "prompt",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "row_number",
+              "displayName": "row_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "readOnly": true,
+              "removed": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "9e6dd2f9-6e9b-4880-a536-89dbf215417a",
+      "name": "Google Sheets - Update Row",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        2720,
+        1760
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "2c920e5f-7447-455d-8613-ad98277f7009",
+      "name": "Done",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2960,
+        1952
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets - Read Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Sheets - Read Rows": {
+      "main": [
+        [
+          {
+            "node": "Loop Rows (Split In Batches)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Rows (Split In Batches)": {
+      "main": [
+        [
+          {
+            "node": "Done",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "IF - Not Drafted",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF - Not Drafted": {
+      "main": [
+        [
+          {
+            "node": "Build Row Context (Available Columns)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Loop Rows (Split In Batches)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Row Context (Available Columns)": {
+      "main": [
+        [
+          {
+            "node": "Prepare Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Prompt": {
+      "main": [
+        [
+          {
+            "node": "LLM - Gemini Generate (HTTP)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM - Gemini Generate (HTTP)": {
+      "main": [
+        [
+          {
+            "node": "Parse LLM Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse LLM Output": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets - Update Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Sheets - Update Row": {
+      "main": [
+        [
+          {
+            "node": "Loop Rows (Split In Batches)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "809421b4-1ee2-4e93-ac56-3a85d2e923ba",
+  "meta": {
+    "instanceId": "078473cb944d2c5d9231b63e408664724f0e7382239fcfa4398159284cf35dac"
+  },
+  "id": "IYu7ixTsdgvoix00VtacL",
+  "tags": []
+}
